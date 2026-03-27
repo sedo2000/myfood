@@ -54,14 +54,13 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// إنشاء رسالة التحدي الأولى
-func initialGame(chatID int64, player1ID int64, name string, token string) {
+func initialGame(chatID int64, p1ID int64, name string, token string) {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
-	text := fmt.Sprintf("🎮 **تحدي XO جديد!**\n👤 المنظم: [%s](tg://user?id=%d)\n\nبانتظار خصم للانضمام...", name, player1ID)
+	text := fmt.Sprintf("🎮 **تحدي XO جديد!**\n👤 المنظم: [%s](tg://user?id=%d) (ID: `%d`)\n\nبانتظار خصم للانضمام...", name, p1ID, p1ID)
 	
 	keyboard := map[string]interface{}{
 		"inline_keyboard": [][]map[string]interface{}{
-			{{ "text": "انضمام للتحدي ⚔️", "callback_data": fmt.Sprintf("join|%d", player1ID) }},
+			{{ "text": "انضمام للتحدي ⚔️", "callback_data": fmt.Sprintf("join|%d", p1ID) }},
 		},
 	}
 
@@ -92,7 +91,8 @@ func processAction(up Update, token string) {
 func startRealGame(up Update, p1ID, p2ID string, token string) {
 	editUrl := fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", token)
 	board := "........."
-	text := "🎮 اللعبة بدأت!\n❌ الدور: اللاعب الأول"
+	// منشن اللاعب الأول في البداية
+	text := fmt.Sprintf("🎮 بدأت اللعبة!\n\n❌ الدور الآن: [اللاعب الأول](tg://user?id=%s)\nID: `%s`", p1ID, p1ID)
 	keyboard := renderBoard(board, "X", p1ID, p2ID)
 	
 	payload := map[string]interface{}{
@@ -104,16 +104,14 @@ func startRealGame(up Update, p1ID, p2ID string, token string) {
 }
 
 func handleXOMove(up Update, parts []string, token string) {
-	// data format: move | index | board | turn | p1ID | p2ID
 	idx := int(parts[1][0] - '0')
 	board := []rune(parts[2])
 	turn := parts[3]
 	p1ID, p2ID := parts[4], parts[5]
 	currentClicker := fmt.Sprintf("%d", up.CallbackQuery.From.ID)
 
-	// التحقق من الدور
 	if (turn == "X" && currentClicker != p1ID) || (turn == "O" && currentClicker != p2ID) {
-		answer(up.CallbackQuery.ID, "🚫 انتظر دورك!", token)
+		answer(up.CallbackQuery.ID, "🚫 ليس دورك! انتظر الخصم.", token)
 		return
 	}
 
@@ -124,11 +122,23 @@ func handleXOMove(up Update, parts []string, token string) {
 	var status string
 	var next string
 	if winner != "" {
-		if winner == "Draw" { status = "🤝 تعادل!" } else { status = "🎉 الفائز: " + winner }
+		if winner == "Draw" {
+			status = "🤝 **تعادل!**\nلا يوجد فائز في هذه الجولة."
+		} else {
+			winnerID := p1ID
+			if winner == "O" { winnerID = p2ID }
+			status = fmt.Sprintf("🎉 **الفائز هو: %s**\nاللاعب: [Winner](tg://user?id=%s)\nID: `%s`", winner, winnerID, winnerID)
+		}
 		next = "END"
 	} else {
-		if turn == "X" { next = "O" } else { next = "X" }
-		status = "🎮 الدور الآن على: " + next
+		nextID := p1ID
+		if turn == "X" { 
+			next = "O"
+			nextID = p2ID
+		} else { 
+			next = "X"
+		}
+		status = fmt.Sprintf("🎮 الدور الآن على: **%s**\n👤 اللاعب: [دورك الآن](tg://user?id=%s)\nID: `%s`", next, nextID, nextID)
 	}
 
 	editUrl := fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", token)
@@ -147,8 +157,9 @@ func renderBoard(board string, next, p1, p2 string) map[string]interface{} {
 		for j := 0; j < 3; j++ {
 			n := i*3 + j
 			char := string(board[n])
-			txt := " "
-			if char != "." { txt = char }
+			txt := "▫️" // شكل المربع الفارغ
+			if char == "X" { txt = "❌" }
+			if char == "O" { txt = "⭕" }
 			
 			callData := "ignore"
 			if next != "END" && char == "." {
@@ -161,7 +172,6 @@ func renderBoard(board string, next, p1, p2 string) map[string]interface{} {
 	return map[string]interface{}{"inline_keyboard": rows}
 }
 
-// ... دوال checkWinner و sendReq و answer (نفس السابقة مع تعديل بسيط)
 func checkWinner(b string) string {
 	winPatterns := []string{"012", "345", "678", "036", "147", "258", "048", "246"}
 	for _, p := range winPatterns {
