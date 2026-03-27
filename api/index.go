@@ -9,19 +9,26 @@ import (
 	"strings"
 )
 
-// هيكل البيانات المحدث
+// هيكل البيانات الأساسي
 type Update struct {
 	Message struct {
 		MessageID int64  `json:"message_id"`
 		Text      string `json:"text"`
-		Chat      struct {
+		From      struct {
+			ID        int64  `json:"id"`
+			FirstName string `json:"first_name"`
+		} `json:"from"`
+		Chat struct {
 			ID int64 `json:"id"`
 		} `json:"chat"`
-		Photo []interface{} `json:"photo"`
 	} `json:"message"`
 	CallbackQuery struct {
-		ID      string `json:"id"`
-		Data    string `json:"data"`
+		ID   string `json:"id"`
+		Data string `json:"data"`
+		From struct {
+			ID        int64  `json:"id"`
+			FirstName string `json:"first_name"`
+		} `json:"from"`
 		Message struct {
 			MessageID int64 `json:"message_id"`
 			Chat      struct {
@@ -31,8 +38,6 @@ type Update struct {
 	} `json:"callback_query"`
 }
 
-var votes = make(map[string]map[string]int)
-
 func Handler(w http.ResponseWriter, r *http.Request) {
 	token := os.Getenv("TELEGRAM_TOKEN")
 	var update Update
@@ -40,91 +45,125 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. معالجة الرسائل النصية (أمر /start)
-	if update.Message.Text == "/start" {
-		sendStartMessage(update.Message.Chat.ID, token)
+	// 1. أمر بدء اللعبة في المجموعة
+	if strings.HasPrefix(update.Message.Text, "/xo") {
+		sendNewGame(update.Message.Chat.ID, token)
 	}
 
-	// 2. إذا كانت الرسالة "صورة"
-	if len(update.Message.Photo) > 0 {
-		sendClassificationButtons(update.Message.Chat.ID, update.Message.MessageID, token)
-	}
-
-	// 3. إذا ضغط العضو على زر (تصنيف)
+	// 2. معالجة الحركات (الضغط على الأزرار)
 	if update.CallbackQuery.ID != "" {
-		handleVote(update, token)
+		handleMove(update, token)
 	}
 
 	w.WriteHeader(http.StatusOK)
 }
 
-// دالة رسالة الترحيب /start
-func sendStartMessage(chatID int64, token string) {
+func sendNewGame(chatID int64, token string) {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
-	welcomeText := "اهلا بك في بوت **التصنيف الجماعي** لعام 2026! 🚀\n\n" +
-		"وظيفتي هي تنظيم صور المجموعة بمساعدتكم:\n" +
-		"1. ارسل اي صورة في المجموعة.\n" +
-		"2. سيظهر تحتها ازار للتصنيف.\n" +
-		"3. عند تصويت 3 اعضاء على نفس النوع، سيتم اعتماد التصنيف رسميًا!\n\n" +
-		"ابدأ الآن بارسال اول صورة ليومياتك. 📸"
-
+	// لوحة البداية: 9 أزرار فارغة
+	keyboard := renderBoard(".........", "X")
 	payload := map[string]interface{}{
-		"chat_id":    chatID,
-		"text":       welcomeText,
-		"parse_mode": "Markdown", // لجعل الخط عريض وجميل
+		"chat_id":      chatID,
+		"text":         "🎮 تحدي XO جديد!\nالدور الآن على: **X**",
+		"reply_markup": keyboard,
+		"parse_mode":   "Markdown",
 	}
-	
-	body, _ := json.Marshal(payload)
-	http.Post(url, "application/json", bytes.NewBuffer(body))
+	sendRequest(url, payload)
 }
 
-// --- بقية الدوال السابقة (لا تتغير) ---
+func handleMove(up Update, token string) {
+	data := up.CallbackQuery.Data // الصيغة: "position|board|turn" -> "0|.........|X"
+	parts := strings.Split(data, "|")
+	pos := parts[0]
+	board := []rune(parts[1])
+	turn := parts[2]
 
-func sendClassificationButtons(chatID int64, msgID int64, token string) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
-	keyboard := map[string]interface{}{
-		"inline_keyboard": [][]map[string]string{
-			{
-				{"text": "طبيعة 🌿", "callback_data": fmt.Sprintf("%d_nature", msgID)},
-				{"text": "طعام 🍔", "callback_data": fmt.Sprintf("%d_food", msgID)},
-			},
-			{
-				{"text": "يوميات 🤳", "callback_data": fmt.Sprintf("%d_daily", msgID)},
-				{"text": "مضحك 😂", "callback_data": fmt.Sprintf("%d_funny", msgID)},
-			},
-		},
+	idx := int(pos[0] - '0')
+	if board[idx] != '.' {
+		answerCallback(up.CallbackQuery.ID, "❌ هذا المربع مشغول!", token)
+		return
 	}
-	kbJson, _ := json.Marshal(keyboard)
-	payload := map[string]interface{}{
-		"chat_id":             chatID,
-		"text":                "كيف تصنف هذه الصورة؟ (تحتاج 3 أصوات)",
-		"reply_to_message_id": msgID,
-		"reply_markup":        string(kbJson),
-	}
-	body, _ := json.Marshal(payload)
-	http.Post(url, "application/json", bytes.NewBuffer(body))
-}
 
-func handleVote(up Update, token string) {
-	data := up.CallbackQuery.Data
-	parts := strings.Split(data, "_")
-	msgID := parts[0]
-	tag := parts[1]
-	if votes[msgID] == nil { votes[msgID] = make(map[string]int) }
-	votes[msgID][tag]++
-	count := votes[msgID][tag]
-	if count >= 3 {
-		announceWinner(up.CallbackQuery.Message.Chat.ID, tag, token)
-		delete(votes, msgID)
+	// تنفيذ الحركة
+	board[idx] = rune(turn[0])
+	newBoard := string(board)
+
+	// التحقق من الفوز
+	winner := checkWinner(newBoard)
+	var statusText string
+	var nextTurn string
+
+	if winner != "" {
+		if winner == "Draw" {
+			statusText = "🤝 تعادل! لا يوجد فائز."
+		} else {
+			statusText = fmt.Sprintf("🎉 مبروك! الفائز هو: %s", winner)
+		}
+		nextTurn = "END"
 	} else {
-		answerCallback(up.CallbackQuery.ID, fmt.Sprintf("تم تسجيل صوتك لـ %s! (الحالي: %d)", tag, count), token)
+		if turn == "X" {
+			nextTurn = "O"
+		} else {
+			nextTurn = "X"
+		}
+		statusText = fmt.Sprintf("🎮 الدور الآن على: %s", nextTurn)
 	}
+
+	// تحديث الرسالة الحالية
+	editUrl := fmt.Sprintf("https://api.telegram.org/bot%s/editMessageText", token)
+	editPayload := map[string]interface{}{
+		"chat_id":    up.CallbackQuery.Message.Chat.ID,
+		"message_id": up.CallbackQuery.Message.MessageID,
+		"text":       statusText,
+		"reply_markup": renderBoard(newBoard, nextTurn),
+		"parse_mode": "Markdown",
+	}
+	sendRequest(editUrl, editPayload)
+	answerCallback(up.CallbackQuery.ID, "", token)
 }
 
-func announceWinner(chatID int64, tag string, token string) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
-	text := fmt.Sprintf("✅ تم الإجماع! الصورة تم تصنيفها كـ: #%s", tag)
-	payload := map[string]interface{}{"chat_id": chatID, "text": text}
+func renderBoard(board string, nextTurn string) map[string]interface{} {
+	rows := [][]map[string]string{}
+	for i := 0; i < 3; i++ {
+		row := []map[string]string{}
+		for j := 0; j < 3; j++ {
+			idx := i*3 + j
+			char := string(board[idx])
+			display := " "
+			if char != "." {
+				display = char
+			}
+			
+			callbackData := "ignore"
+			if nextTurn != "END" && char == "." {
+				callbackData = fmt.Sprintf("%d|%s|%s", idx, board, nextTurn)
+			}
+			
+			row = append(row, map[string]string{
+				"text":          display,
+				"callback_data": callbackData,
+			})
+		}
+		rows = append(rows, row)
+	}
+	return map[string]interface{}{"inline_keyboard": rows}
+}
+
+func checkWinner(b string) string {
+	lines := []string{
+		b[0:3], b[3:6], b[6:9], // صفوف
+		string([]byte{b[0], b[3], b[6]}), string([]byte{b[1], b[4], b[7]}), string([]byte{b[2], b[5], b[8]}), // أعمدة
+		string([]byte{b[0], b[4], b[8]}), string([]byte{b[2], b[4], b[6]}), // أقطار
+	}
+	for _, l := range lines {
+		if l == "XXX" { return "X" }
+		if l == "OOO" { return "O" }
+	}
+	if !strings.Contains(b, ".") { return "Draw" }
+	return ""
+}
+
+func sendRequest(url string, payload interface{}) {
 	body, _ := json.Marshal(payload)
 	http.Post(url, "application/json", bytes.NewBuffer(body))
 }
